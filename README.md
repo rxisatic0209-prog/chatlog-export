@@ -28,3 +28,7 @@
 ---
 效果如下
 <img width="2532" height="1344" alt="image" src="https://github.com/user-attachments/assets/34bcefef-8d3a-4310-bd11-41e98c9e6353" />
+
+---
+
+其它问题请看https://github.com/sjzar/chatlog/issues/131
