@@ -72,6 +72,9 @@ archives:
     files:
       - LICENSE
       - README.md
+      - docs/mcp.md
+      - docs/release.md
+      - export_json/chatbrowser.html
 
 upx:
   - enabled: "{{ .Env.ENABLE_UPX }}"
