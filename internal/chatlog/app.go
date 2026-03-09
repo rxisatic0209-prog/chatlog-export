@@ -2,6 +2,7 @@ package chatlog
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -46,6 +47,11 @@ type App struct {
 	tabCount  int
 }
 
+type exportTalkerOption struct {
+	DisplayName string
+	Talker      string
+}
+
 func NewApp(ctx *ctx.Context, m *Manager) *App {
 	app := &App{
 		ctx:         ctx,
@@ -64,6 +70,126 @@ func NewApp(ctx *ctx.Context, m *Manager) *App {
 	app.updateMenuItemsState()
 
 	return app
+}
+
+func getChatRoomDisplayName(chatRoom *model.ChatRoom) string {
+	if chatRoom == nil {
+		return ""
+	}
+	if name := chatRoom.DisplayName(); name != "" {
+		return name
+	}
+	return chatRoom.Name
+}
+
+func (a *App) getGroupExportOptions() ([]exportTalkerOption, error) {
+	chatRooms, err := a.m.db.GetChatRooms("", 0, 0)
+	if err != nil {
+		return nil, err
+	}
+	if chatRooms == nil || len(chatRooms.Items) == 0 {
+		return nil, fmt.Errorf("未找到群聊")
+	}
+
+	options := make([]exportTalkerOption, 0, len(chatRooms.Items)+1)
+	options = append(options, exportTalkerOption{DisplayName: "全部群聊记录", Talker: ""})
+
+	distinct := make(map[string]bool, len(chatRooms.Items))
+	for _, chatRoom := range chatRooms.Items {
+		if chatRoom == nil || chatRoom.Name == "" || distinct[chatRoom.Name] {
+			continue
+		}
+		distinct[chatRoom.Name] = true
+		options = append(options, exportTalkerOption{
+			DisplayName: getChatRoomDisplayName(chatRoom),
+			Talker:      chatRoom.Name,
+		})
+	}
+
+	if len(options) == 1 {
+		return nil, fmt.Errorf("未找到群聊")
+	}
+
+	return options, nil
+}
+
+func filterExportTalkerOptions(options []exportTalkerOption, keyword string) []exportTalkerOption {
+	if keyword == "" {
+		return options
+	}
+
+	filtered := make([]exportTalkerOption, 0, len(options))
+	for _, option := range options {
+		if strings.Contains(option.DisplayName, keyword) || strings.Contains(option.Talker, keyword) {
+			filtered = append(filtered, option)
+		}
+	}
+	return filtered
+}
+
+func (a *App) getTalkerNameForExport(talker string) string {
+	if talker == "" {
+		return ""
+	}
+
+	chatRooms, err := a.m.db.GetChatRooms(talker, 0, 1)
+	if err == nil && len(chatRooms.Items) > 0 {
+		if name := getChatRoomDisplayName(chatRooms.Items[0]); name != "" {
+			return name
+		}
+	}
+
+	contacts, err := a.m.db.GetContacts(talker, 0, 1)
+	if err == nil && len(contacts.Items) > 0 {
+		if name := contacts.Items[0].DisplayName(); name != "" {
+			return name
+		}
+		return contacts.Items[0].UserName
+	}
+
+	return talker
+}
+
+func getDesktopExportDir(format string) (string, error) {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(homeDir, "Desktop", "export_"+format), nil
+}
+
+func parseExportDateInput(dateStr string) (time.Time, error) {
+	dateStr = strings.TrimSpace(dateStr)
+	if dateStr == "" {
+		return time.Time{}, nil
+	}
+	return time.Parse("2006-01-02", dateStr)
+}
+
+func parseExportDateRange(startStr, endStr string) (time.Time, time.Time, error) {
+	startTime, err := parseExportDateInput(startStr)
+	if err != nil {
+		return time.Time{}, time.Time{}, fmt.Errorf("开始日期格式错误，请使用 YYYY-MM-DD")
+	}
+
+	endTime, err := parseExportDateInput(endStr)
+	if err != nil {
+		return time.Time{}, time.Time{}, fmt.Errorf("结束日期格式错误，请使用 YYYY-MM-DD")
+	}
+
+	if !endTime.IsZero() {
+		endTime = endTime.Add(24 * time.Hour)
+	}
+
+	if !startTime.IsZero() && !endTime.IsZero() && !startTime.Before(endTime) {
+		return time.Time{}, time.Time{}, fmt.Errorf("开始日期不能晚于结束日期")
+	}
+
+	return startTime, endTime, nil
+}
+
+func acceptDateInput(textToCheck string, lastChar rune) bool {
+	return (lastChar >= '0' && lastChar <= '9') || lastChar == '-'
 }
 
 func (a *App) Run() error {
@@ -864,19 +990,17 @@ func (a *App) showInfo(text string) {
 func (a *App) selectTalkerForExport(format string) {
 	// 显示选择聊天对象的模态框
 	modal := tview.NewModal().
-		SetText("正在获取联系人列表...").
+		SetText("正在获取群聊列表...").
 		AddButtons([]string{"取消"})
 	a.mainPages.AddPage("modal", modal, true, true)
 	a.SetFocus(modal)
 
-	// 在后台获取联系人列表
+	// 在后台获取群聊列表
 	go func() {
-		// 获取联系人列表
-		contacts, err := a.m.db.GetContacts("", 0, 0)
+		options, err := a.getGroupExportOptions()
 		if err != nil {
-			// 在主线程中更新UI
 			a.QueueUpdateDraw(func() {
-				modal.SetText("获取联系人列表失败: " + err.Error())
+				modal.SetText("获取群聊列表失败: " + err.Error())
 				modal.SetDoneFunc(func(buttonIndex int, buttonLabel string) {
 					a.mainPages.RemovePage("modal")
 				})
@@ -889,49 +1013,16 @@ func (a *App) selectTalkerForExport(format string) {
 		a.QueueUpdateDraw(func() {
 			a.mainPages.RemovePage("modal")
 
-			// 创建一个列表用于选择联系人
+			// 创建一个列表用于选择群聊
 			list := tview.NewList().
 				ShowSecondaryText(false).
 				SetSelectedFunc(func(i int, s string, s2 string, r rune) {
 					a.mainPages.RemovePage("contactSelector")
-					talker := ""
-					if i > 0 { // 不是"全部聊天记录"选项
-						// 遍历列表项找到对应的联系人
-						var selectedContact *model.Contact
-						for _, contact := range contacts.Items {
-							name := contact.Remark
-							if name == "" {
-								name = contact.NickName
-							}
-							if name == "" {
-								name = contact.UserName
-							}
-							if name == s {
-								selectedContact = contact
-								break
-							}
-						}
-						if selectedContact != nil {
-							talker = selectedContact.UserName
-						}
-					}
-					// 执行导出
-					a.showExportOptions(format, talker)
+					a.showExportOptions(format, s2)
 				})
 
-			// 添加"全部聊天记录"选项
-			list.AddItem("全部聊天记录", "", 0, nil)
-
-			// 添加所有联系人
-			for _, contact := range contacts.Items {
-				name := contact.Remark
-				if name == "" {
-					name = contact.NickName
-				}
-				if name == "" {
-					name = contact.UserName
-				}
-				list.AddItem(name, contact.UserName, 0, nil)
+			for _, option := range options {
+				list.AddItem(option.DisplayName, option.Talker, 0, nil)
 			}
 
 			// 添加返回选项
@@ -942,7 +1033,7 @@ func (a *App) selectTalkerForExport(format string) {
 			// 创建搜索输入框
 			searchField := tview.NewInputField().
 				SetLabel("搜索: ").
-				SetPlaceholder("请输入关键词，按Tab键切换到列表").
+				SetPlaceholder("请输入群聊关键词，按Tab键切换到列表").
 				SetFieldWidth(30).
 				SetDoneFunc(func(key tcell.Key) {
 					if key == tcell.KeyEnter || key == tcell.KeyTab {
@@ -953,49 +1044,16 @@ func (a *App) selectTalkerForExport(format string) {
 			// 添加搜索功能
 			searchField.SetChangedFunc(func(text string) {
 				list.Clear()
-				// 添加"全部聊天记录"选项
-				list.AddItem("全部聊天记录", "", 0, nil)
-
-				// 根据搜索文本过滤联系人
-				filteredContacts := make([]*model.Contact, 0)
-				if text == "" {
-					// 如果搜索文本为空，显示所有联系人
-					filteredContacts = contacts.Items
-				} else {
-					// 根据搜索文本过滤联系人
-					for _, contact := range contacts.Items {
-						name := contact.Remark
-						if name == "" {
-							name = contact.NickName
-						}
-						if name == "" {
-							name = contact.UserName
-						}
-
-						// 检查是否匹配搜索文本
-						if strings.Contains(name, text) || strings.Contains(contact.UserName, text) {
-							filteredContacts = append(filteredContacts, contact)
-						}
-					}
-				}
-
-				// 添加过滤后的联系人
-				for _, contact := range filteredContacts {
-					name := contact.Remark
-					if name == "" {
-						name = contact.NickName
-					}
-					if name == "" {
-						name = contact.UserName
-					}
-					list.AddItem(name, contact.UserName, 0, nil)
+				filteredOptions := filterExportTalkerOptions(options, text)
+				for _, option := range filteredOptions {
+					list.AddItem(option.DisplayName, option.Talker, 0, nil)
 				}
 			})
 
 			// 创建一个页面包含搜索框、列表和说明
 			flex := tview.NewFlex().
 				SetDirection(tview.FlexRow).
-				AddItem(tview.NewTextView().SetText("选择要导出的聊天对象:"), 1, 0, false).
+				AddItem(tview.NewTextView().SetText("选择要导出的群聊:"), 1, 0, false).
 				AddItem(searchField, 1, 0, false).
 				AddItem(list, 0, 1, true)
 
@@ -1010,14 +1068,27 @@ func (a *App) showExportOptions(format string, talker string) {
 	formView := form.NewForm("导出选项")
 
 	exportImages := true
+	startDate := ""
+	endDate := ""
 
 	formView.AddCheckbox("导出图片", exportImages, func(checked bool) {
 		exportImages = checked
 	})
+	formView.AddInputField("开始日期", startDate, 12, acceptDateInput, func(text string) {
+		startDate = text
+	})
+	formView.AddInputField("结束日期", endDate, 12, acceptDateInput, func(text string) {
+		endDate = text
+	})
 
 	formView.AddButton("导出", func() {
+		startTime, endTime, err := parseExportDateRange(startDate, endDate)
+		if err != nil {
+			a.showError(err)
+			return
+		}
 		a.mainPages.RemovePage("submenu2")
-		a.performExport(format, talker, exportImages)
+		a.performExport(format, talker, exportImages, startTime, endTime)
 	})
 	formView.AddButton("取消", func() {
 		a.mainPages.RemovePage("submenu2")
@@ -1028,7 +1099,7 @@ func (a *App) showExportOptions(format string, talker string) {
 }
 
 // performExport 执行实际的导出操作
-func (a *App) performExport(format string, talker string, exportImages bool) {
+func (a *App) performExport(format string, talker string, exportImages bool, startTime, endTime time.Time) {
 	// 显示导出中的模态框
 	modal := tview.NewModal().SetText("正在导出聊天记录...")
 	a.mainPages.AddPage("modal", modal, true, true)
@@ -1037,7 +1108,7 @@ func (a *App) performExport(format string, talker string, exportImages bool) {
 	// 在后台执行导出操作
 	go func() {
 		// 获取消息
-		messages, err := export.GetMessagesForExport(a.m.db, time.Time{}, time.Time{}, talker, false, func(current, total int) {
+		messages, err := export.GetMessagesForExport(a.m.db, startTime, endTime, talker, false, true, func(current, total int) {
 			percentage := float64(current) / float64(total) * 100
 			width := 20 // 进度条宽度
 			completed := int(float64(width) * float64(current) / float64(total))
@@ -1076,8 +1147,19 @@ func (a *App) performExport(format string, talker string, exportImages bool) {
 			return
 		}
 
-		// 确定文件夹名称
-		folderName := "export_" + format
+		// 导出到桌面目录
+		folderName, err := getDesktopExportDir(format)
+		if err != nil {
+			a.QueueUpdateDraw(func() {
+				modal.SetText("获取桌面路径失败: " + err.Error())
+				modal.AddButtons([]string{"OK"})
+				modal.SetDoneFunc(func(buttonIndex int, buttonLabel string) {
+					a.mainPages.RemovePage("modal")
+				})
+				a.SetFocus(modal)
+			})
+			return
+		}
 		// 确保文件夹存在
 		if err := util.PrepareDir(folderName); err != nil {
 			// 在主线程中更新UI
@@ -1095,23 +1177,9 @@ func (a *App) performExport(format string, talker string, exportImages bool) {
 		// 确定文件名前缀
 		var fileNamePrefix string
 		if talker == "" {
-			fileNamePrefix = "全部聊天记录"
+			fileNamePrefix = "全部群聊记录"
 		} else {
-			// 获取聊天对象的显示名称
-			contacts, err := a.m.db.GetContacts(talker, 0, 1)
-			if err == nil && len(contacts.Items) > 0 {
-				contact := contacts.Items[0]
-				name := contact.Remark
-				if name == "" {
-					name = contact.NickName
-				}
-				if name == "" {
-					name = contact.UserName
-				}
-				fileNamePrefix = name
-			} else {
-				fileNamePrefix = talker
-			}
+			fileNamePrefix = a.getTalkerNameForExport(talker)
 		}
 
 		// 确定最终的输出路径
@@ -1206,19 +1274,18 @@ func (a *App) performExport(format string, talker string, exportImages bool) {
 func (a *App) selectTalkerForSelfExport() {
 	// 显示选择聊天对象的模态框
 	modal := tview.NewModal().
-		SetText("正在获取联系人列表...").
+		SetText("正在获取群聊列表...").
 		AddButtons([]string{"取消"})
 	a.mainPages.AddPage("modal", modal, true, true)
 	a.SetFocus(modal)
 
-	// 在后台获取联系人列表
+	// 在后台获取群聊列表
 	go func() {
-		// 获取联系人列表
-		contacts, err := a.m.db.GetContacts("", 0, 0)
+		options, err := a.getGroupExportOptions()
 		if err != nil {
 			// 在主线程中更新UI
 			a.QueueUpdateDraw(func() {
-				modal.SetText("获取联系人列表失败: " + err.Error())
+				modal.SetText("获取群聊列表失败: " + err.Error())
 				modal.SetDoneFunc(func(buttonIndex int, buttonLabel string) {
 					a.mainPages.RemovePage("modal")
 				})
@@ -1231,49 +1298,16 @@ func (a *App) selectTalkerForSelfExport() {
 		a.QueueUpdateDraw(func() {
 			a.mainPages.RemovePage("modal")
 
-			// 创建一个列表用于选择联系人
+			// 创建一个列表用于选择群聊
 			list := tview.NewList().
 				ShowSecondaryText(false).
 				SetSelectedFunc(func(i int, s string, s2 string, r rune) {
 					a.mainPages.RemovePage("contactSelector")
-					talker := ""
-					if i > 0 { // 不是"全部聊天记录"选项
-						// 遍历列表项找到对应的联系人
-						var selectedContact *model.Contact
-						for _, contact := range contacts.Items {
-							name := contact.Remark
-							if name == "" {
-								name = contact.NickName
-							}
-							if name == "" {
-								name = contact.UserName
-							}
-							if name == s {
-								selectedContact = contact
-								break
-							}
-						}
-						if selectedContact != nil {
-							talker = selectedContact.UserName
-						}
-					}
-					// 创建格式选择子菜单
-					a.showSelfExportFormatMenu(talker)
+					a.showSelfExportFormatMenu(s2)
 				})
 
-			// 添加"全部聊天记录"选项
-			list.AddItem("全部聊天记录", "", 0, nil)
-
-			// 添加所有联系人
-			for _, contact := range contacts.Items {
-				name := contact.Remark
-				if name == "" {
-					name = contact.NickName
-				}
-				if name == "" {
-					name = contact.UserName
-				}
-				list.AddItem(name, contact.UserName, 0, nil)
+			for _, option := range options {
+				list.AddItem(option.DisplayName, option.Talker, 0, nil)
 			}
 
 			// 添加返回选项
@@ -1284,7 +1318,7 @@ func (a *App) selectTalkerForSelfExport() {
 			// 创建搜索输入框
 			searchField := tview.NewInputField().
 				SetLabel("搜索: ").
-				SetPlaceholder("请输入关键词，按Tab键切换到列表").
+				SetPlaceholder("请输入群聊关键词，按Tab键切换到列表").
 				SetFieldWidth(30).
 				SetDoneFunc(func(key tcell.Key) {
 					if key == tcell.KeyEnter || key == tcell.KeyTab {
@@ -1295,42 +1329,9 @@ func (a *App) selectTalkerForSelfExport() {
 			// 添加搜索功能
 			searchField.SetChangedFunc(func(text string) {
 				list.Clear()
-				// 添加"全部聊天记录"选项
-				list.AddItem("全部聊天记录", "", 0, nil)
-
-				// 根据搜索文本过滤联系人
-				filteredContacts := make([]*model.Contact, 0)
-				if text == "" {
-					// 如果搜索文本为空，显示所有联系人
-					filteredContacts = contacts.Items
-				} else {
-					// 根据搜索文本过滤联系人
-					for _, contact := range contacts.Items {
-						name := contact.Remark
-						if name == "" {
-							name = contact.NickName
-						}
-						if name == "" {
-							name = contact.UserName
-						}
-
-						// 检查是否匹配搜索文本
-						if strings.Contains(name, text) || strings.Contains(contact.UserName, text) {
-							filteredContacts = append(filteredContacts, contact)
-						}
-					}
-				}
-
-				// 添加过滤后的联系人
-				for _, contact := range filteredContacts {
-					name := contact.Remark
-					if name == "" {
-						name = contact.NickName
-					}
-					if name == "" {
-						name = contact.UserName
-					}
-					list.AddItem(name, contact.UserName, 0, nil)
+				filteredOptions := filterExportTalkerOptions(options, text)
+				for _, option := range filteredOptions {
+					list.AddItem(option.DisplayName, option.Talker, 0, nil)
 				}
 
 				// 添加返回选项
@@ -1345,7 +1346,7 @@ func (a *App) selectTalkerForSelfExport() {
 			// 创建一个页面包含搜索框、列表和说明
 			flex := tview.NewFlex().
 				SetDirection(tview.FlexRow).
-				AddItem(tview.NewTextView().SetText("选择要导出自己发言的聊天对象:"), 1, 0, false).
+				AddItem(tview.NewTextView().SetText("选择要导出自己发言的群聊:"), 1, 0, false).
 				AddItem(searchField, 1, 0, false).
 				AddItem(list, 0, 1, true)
 
@@ -1355,37 +1356,50 @@ func (a *App) selectTalkerForSelfExport() {
 	}()
 }
 
-// showSelfExportFormatMenu 显示导出自己发言的格式选择菜单
+// showSelfExportFormatMenu 显示导出自己发言的格式和日期选项
 func (a *App) showSelfExportFormatMenu(talker string) {
-	// 创建格式选择子菜单
-	formatMenu := menu.NewSubMenu("选择导出格式")
+	formView := form.NewForm("导出我的发言")
 
-	// 添加 JSON 格式选项
-	formatMenu.AddItem(&menu.Item{
-		Index:       1,
-		Name:        "导出为 JSON",
-		Description: "将发言记录导出为 JSON 格式",
-		Selected: func(i *menu.Item) {
-			a.performSelfExport("json", talker)
-		},
+	selectedFormat := "json"
+	startDate := ""
+	endDate := ""
+
+	formView.AddInputField("格式", selectedFormat, 6, func(textToCheck string, lastChar rune) bool {
+		return (lastChar >= 'a' && lastChar <= 'z') || (lastChar >= 'A' && lastChar <= 'Z')
+	}, func(text string) {
+		selectedFormat = strings.ToLower(strings.TrimSpace(text))
+	})
+	formView.AddInputField("开始日期", startDate, 12, acceptDateInput, func(text string) {
+		startDate = text
+	})
+	formView.AddInputField("结束日期", endDate, 12, acceptDateInput, func(text string) {
+		endDate = text
+	})
+	formView.AddButton("导出", func() {
+		if selectedFormat != "json" && selectedFormat != "csv" {
+			a.showError(fmt.Errorf("导出格式仅支持 json 或 csv"))
+			return
+		}
+
+		startTime, endTime, err := parseExportDateRange(startDate, endDate)
+		if err != nil {
+			a.showError(err)
+			return
+		}
+
+		a.mainPages.RemovePage("submenu2")
+		a.performSelfExport(selectedFormat, talker, startTime, endTime)
+	})
+	formView.AddButton("取消", func() {
+		a.mainPages.RemovePage("submenu2")
 	})
 
-	// 添加 CSV 格式选项
-	formatMenu.AddItem(&menu.Item{
-		Index:       2,
-		Name:        "导出为 CSV",
-		Description: "将发言记录导出为 CSV 格式",
-		Selected: func(i *menu.Item) {
-			a.performSelfExport("csv", talker)
-		},
-	})
-
-	a.mainPages.AddPage("submenu2", formatMenu, true, true)
-	a.SetFocus(formatMenu)
+	a.mainPages.AddPage("submenu2", formView, true, true)
+	a.SetFocus(formView)
 }
 
 // performSelfExport 执行导出自己发言的操作
-func (a *App) performSelfExport(format string, talker string) {
+func (a *App) performSelfExport(format string, talker string, startTime, endTime time.Time) {
 	// 显示导出中的模态框
 	modal := tview.NewModal().SetText("正在导出聊天记录...")
 	a.mainPages.AddPage("modal", modal, true, true)
@@ -1394,7 +1408,7 @@ func (a *App) performSelfExport(format string, talker string) {
 	// 在后台执行导出操作
 	go func() {
 		// 获取消息
-		messages, err := export.GetMessagesForExport(a.m.db, time.Time{}, time.Time{}, talker, true, func(current, total int) {
+		messages, err := export.GetMessagesForExport(a.m.db, startTime, endTime, talker, true, true, func(current, total int) {
 			percentage := float64(current) / float64(total) * 100
 			width := 20 // 进度条宽度
 			completed := int(float64(width) * float64(current) / float64(total))
@@ -1433,8 +1447,19 @@ func (a *App) performSelfExport(format string, talker string) {
 			return
 		}
 
-		// 确定文件夹名称
-		folderName := "export_" + format
+		// 导出到桌面目录
+		folderName, err := getDesktopExportDir(format)
+		if err != nil {
+			a.QueueUpdateDraw(func() {
+				modal.SetText("获取桌面路径失败: " + err.Error())
+				modal.AddButtons([]string{"OK"})
+				modal.SetDoneFunc(func(buttonIndex int, buttonLabel string) {
+					a.mainPages.RemovePage("modal")
+				})
+				a.SetFocus(modal)
+			})
+			return
+		}
 		// 确保文件夹存在
 		if err := util.PrepareDir(folderName); err != nil {
 			// 在主线程中更新UI
@@ -1452,23 +1477,9 @@ func (a *App) performSelfExport(format string, talker string) {
 		// 确定文件名前缀
 		var fileNamePrefix string
 		if talker == "" {
-			fileNamePrefix = "我的全部发言"
+			fileNamePrefix = "我的全部群聊发言"
 		} else {
-			// 获取聊天对象的显示名称
-			contacts, err := a.m.db.GetContacts(talker, 0, 1)
-			if err == nil && len(contacts.Items) > 0 {
-				contact := contacts.Items[0]
-				name := contact.Remark
-				if name == "" {
-					name = contact.NickName
-				}
-				if name == "" {
-					name = contact.UserName
-				}
-				fileNamePrefix = "我的_" + name
-			} else {
-				fileNamePrefix = "我的_" + talker
-			}
+			fileNamePrefix = "我的_" + a.getTalkerNameForExport(talker)
 		}
 
 		// 导出

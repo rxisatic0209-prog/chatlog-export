@@ -421,118 +421,63 @@ func (ds *DataSource) GetChatRooms(ctx context.Context, key string, limit, offse
 	var query string
 	var args []interface{}
 
-	// 执行查询
 	db, err := ds.dbm.GetDB(Contact)
 	if err != nil {
 		return nil, err
 	}
 
 	if key != "" {
-		// 按照关键字查询
-		query = `SELECT username, owner, ext_buffer FROM chat_room WHERE username = ?`
+		query = `
+			SELECT username, owner, ext_buffer
+			FROM chat_room
+			WHERE username LIKE '%@chatroom'
+			  AND username = ?
+		`
 		args = []interface{}{key}
-
-		rows, err := db.QueryContext(ctx, query, args...)
-		if err != nil {
-			return nil, errors.QueryFailed(query, err)
-		}
-		defer rows.Close()
-
-		chatRooms := []*model.ChatRoom{}
-		for rows.Next() {
-			var chatRoomV4 model.ChatRoomV4
-			err := rows.Scan(
-				&chatRoomV4.UserName,
-				&chatRoomV4.Owner,
-				&chatRoomV4.ExtBuffer,
-			)
-
-			if err != nil {
-				return nil, errors.ScanRowFailed(err)
-			}
-
-			chatRooms = append(chatRooms, chatRoomV4.Wrap())
-		}
-
-		// 如果没有找到群聊，尝试通过联系人查找
-		if len(chatRooms) == 0 {
-			contacts, err := ds.GetContacts(ctx, key, 1, 0)
-			if err == nil && len(contacts) > 0 && strings.HasSuffix(contacts[0].UserName, "@chatroom") {
-				// 再次尝试通过用户名查找群聊
-				rows, err := db.QueryContext(ctx,
-					`SELECT username, owner, ext_buffer FROM chat_room WHERE username = ?`,
-					contacts[0].UserName)
-
-				if err != nil {
-					return nil, errors.QueryFailed(query, err)
-				}
-				defer rows.Close()
-
-				for rows.Next() {
-					var chatRoomV4 model.ChatRoomV4
-					err := rows.Scan(
-						&chatRoomV4.UserName,
-						&chatRoomV4.Owner,
-						&chatRoomV4.ExtBuffer,
-					)
-
-					if err != nil {
-						return nil, errors.ScanRowFailed(err)
-					}
-
-					chatRooms = append(chatRooms, chatRoomV4.Wrap())
-				}
-
-				// 如果群聊记录不存在，但联系人记录存在，创建一个模拟的群聊对象
-				if len(chatRooms) == 0 {
-					chatRooms = append(chatRooms, &model.ChatRoom{
-						Name:             contacts[0].UserName,
-						Users:            make([]model.ChatRoomUser, 0),
-						User2DisplayName: make(map[string]string),
-					})
-				}
-			}
-		}
-
-		return chatRooms, nil
 	} else {
-		// 查询所有群聊
-		query = `SELECT username, owner, ext_buffer FROM chat_room`
-
-		// 添加排序、分页
-		query += ` ORDER BY username`
-		if limit > 0 {
-			query += fmt.Sprintf(" LIMIT %d", limit)
-			if offset > 0 {
-				query += fmt.Sprintf(" OFFSET %d", offset)
-			}
-		}
-
-		// 执行查询
-		rows, err := db.QueryContext(ctx, query, args...)
-		if err != nil {
-			return nil, errors.QueryFailed(query, err)
-		}
-		defer rows.Close()
-
-		chatRooms := []*model.ChatRoom{}
-		for rows.Next() {
-			var chatRoomV4 model.ChatRoomV4
-			err := rows.Scan(
-				&chatRoomV4.UserName,
-				&chatRoomV4.Owner,
-				&chatRoomV4.ExtBuffer,
-			)
-
-			if err != nil {
-				return nil, errors.ScanRowFailed(err)
-			}
-
-			chatRooms = append(chatRooms, chatRoomV4.Wrap())
-		}
-
-		return chatRooms, nil
+		query = `
+			SELECT username, owner, ext_buffer
+			FROM chat_room
+			WHERE username LIKE '%@chatroom'
+		`
 	}
+
+	query += ` ORDER BY username`
+	if limit > 0 {
+		query += fmt.Sprintf(" LIMIT %d", limit)
+		if offset > 0 {
+			query += fmt.Sprintf(" OFFSET %d", offset)
+		}
+	}
+
+	rows, err := db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, errors.QueryFailed(query, err)
+	}
+	defer rows.Close()
+
+	chatRooms := []*model.ChatRoom{}
+	for rows.Next() {
+		var chatRoomV4 model.ChatRoomV4
+		err := rows.Scan(
+			&chatRoomV4.UserName,
+			&chatRoomV4.Owner,
+			&chatRoomV4.ExtBuffer,
+		)
+		if err != nil {
+			return nil, errors.ScanRowFailed(err)
+		}
+
+		chatRoom := chatRoomV4.Wrap()
+
+		if chatRoom == nil || chatRoom.Name == "" || !strings.HasSuffix(chatRoom.Name, "@chatroom") {
+			continue
+		}
+
+		chatRooms = append(chatRooms, chatRoom)
+	}
+
+	return chatRooms, nil
 }
 
 // 最近会话
@@ -541,20 +486,17 @@ func (ds *DataSource) GetSessions(ctx context.Context, key string, limit, offset
 	var args []interface{}
 
 	if key != "" {
-		// 按照关键字查询
 		query = `SELECT username, summary, last_timestamp, last_msg_sender, last_sender_display_name 
 				FROM SessionTable 
 				WHERE username = ? OR last_sender_display_name = ?
 				ORDER BY sort_timestamp DESC`
 		args = []interface{}{key, key}
 	} else {
-		// 查询所有会话
 		query = `SELECT username, summary, last_timestamp, last_msg_sender, last_sender_display_name 
 				FROM SessionTable 
 				ORDER BY sort_timestamp DESC`
 	}
 
-	// 添加分页
 	if limit > 0 {
 		query += fmt.Sprintf(" LIMIT %d", limit)
 		if offset > 0 {
@@ -562,11 +504,11 @@ func (ds *DataSource) GetSessions(ctx context.Context, key string, limit, offset
 		}
 	}
 
-	// 执行查询
 	db, err := ds.dbm.GetDB(Session)
 	if err != nil {
 		return nil, err
 	}
+
 	rows, err := db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, errors.QueryFailed(query, err)
@@ -574,6 +516,7 @@ func (ds *DataSource) GetSessions(ctx context.Context, key string, limit, offset
 	defer rows.Close()
 
 	sessions := []*model.Session{}
+
 	for rows.Next() {
 		var sessionV4 model.SessionV4
 		err := rows.Scan(
@@ -583,7 +526,6 @@ func (ds *DataSource) GetSessions(ctx context.Context, key string, limit, offset
 			&sessionV4.LastMsgSender,
 			&sessionV4.LastSenderDisplayName,
 		)
-
 		if err != nil {
 			return nil, errors.ScanRowFailed(err)
 		}
@@ -593,13 +535,13 @@ func (ds *DataSource) GetSessions(ctx context.Context, key string, limit, offset
 
 	return sessions, nil
 }
-
 func (ds *DataSource) GetMedia(ctx context.Context, _type string, key string) (*model.Media, error) {
 	if key == "" {
 		return nil, errors.ErrKeyEmpty
 	}
 
 	var table string
+
 	switch _type {
 	case "image":
 		table = "image_hardlink_info_v3"
@@ -627,24 +569,24 @@ func (ds *DataSource) GetMedia(ctx context.Context, _type string, key string) (*
 		dir2id d1 ON d1.rowid = f.dir1
 	LEFT JOIN 
 		dir2id d2 ON d2.rowid = f.dir2
-	`, table)
-	query += " WHERE f.md5 = ? OR f.file_name LIKE ? || '%'"
-	args := []interface{}{key, key}
+	WHERE f.md5 = ?`, table)
 
-	// 执行查询
 	db, err := ds.dbm.GetDB(Media)
 	if err != nil {
 		return nil, err
 	}
-	rows, err := db.QueryContext(ctx, query, args...)
+
+	rows, err := db.QueryContext(ctx, query, key)
 	if err != nil {
 		return nil, errors.QueryFailed(query, err)
 	}
 	defer rows.Close()
 
 	var media *model.Media
+
 	for rows.Next() {
 		var mediaV4 model.MediaV4
+
 		err := rows.Scan(
 			&mediaV4.Key,
 			&mediaV4.Name,
@@ -656,13 +598,9 @@ func (ds *DataSource) GetMedia(ctx context.Context, _type string, key string) (*
 		if err != nil {
 			return nil, errors.ScanRowFailed(err)
 		}
+
 		mediaV4.Type = _type
 		media = mediaV4.Wrap()
-
-		// 跳过缩略图
-		if _type == "image" && !strings.Contains(media.Name, "_t") {
-			break
-		}
 	}
 
 	if media == nil {
@@ -671,18 +609,11 @@ func (ds *DataSource) GetMedia(ctx context.Context, _type string, key string) (*
 
 	return media, nil
 }
-
 func (ds *DataSource) GetVoice(ctx context.Context, key string) (*model.Media, error) {
-	if key == "" {
-		return nil, errors.ErrKeyEmpty
-	}
-
 	query := `
 	SELECT voice_data
 	FROM VoiceInfo
-	WHERE svr_id = ? 
-	`
-	args := []interface{}{key}
+	WHERE svr_id = ?`
 
 	dbs, err := ds.dbm.GetDBs(Voice)
 	if err != nil {
@@ -690,7 +621,7 @@ func (ds *DataSource) GetVoice(ctx context.Context, key string) (*model.Media, e
 	}
 
 	for _, db := range dbs {
-		rows, err := db.QueryContext(ctx, query, args...)
+		rows, err := db.QueryContext(ctx, query, key)
 		if err != nil {
 			return nil, errors.QueryFailed(query, err)
 		}
@@ -698,12 +629,12 @@ func (ds *DataSource) GetVoice(ctx context.Context, key string) (*model.Media, e
 
 		for rows.Next() {
 			var voiceData []byte
-			err := rows.Scan(
-				&voiceData,
-			)
+
+			err := rows.Scan(&voiceData)
 			if err != nil {
 				return nil, errors.ScanRowFailed(err)
 			}
+
 			if len(voiceData) > 0 {
 				return &model.Media{
 					Type: "voice",
@@ -716,7 +647,6 @@ func (ds *DataSource) GetVoice(ctx context.Context, key string) (*model.Media, e
 
 	return nil, errors.ErrMediaNotFound
 }
-
 func (ds *DataSource) Close() error {
 	return ds.dbm.Close()
 }

@@ -31,6 +31,8 @@ go.work.sum
 *.jpeg
 *.gif
 *.zip
+.DS_Store
+chatlog_mac
 
 
 # 忽略 chatlog 自动生成的工作目录

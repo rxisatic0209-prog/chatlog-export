@@ -34,7 +34,8 @@ func ExportMessages(messages []*model.Message, outputPath string, format string,
 func GetMessagesForExport(db interface {
 	GetMessages(startTime, endTime time.Time, talker, sender, content string, offset, limit int) ([]*model.Message, error)
 	GetContacts(keyword string, offset, limit int) (*wechatdb.GetContactsResp, error)
-}, startTime, endTime time.Time, talker string, onlySelf bool, progress ProgressCallback) ([]*model.Message, error) {
+	GetChatRooms(keyword string, offset, limit int) (*wechatdb.GetChatRoomsResp, error)
+}, startTime, endTime time.Time, talker string, onlySelf bool, onlyChatRooms bool, progress ProgressCallback) ([]*model.Message, error) {
 	// 如果没有指定时间范围，默认从2010年到现在
 	if startTime.IsZero() {
 		startTime, _ = time.Parse("2006-01-02", "2010-01-01")
@@ -55,47 +56,75 @@ func GetMessagesForExport(db interface {
 		return msgs, nil
 	}
 
-	// 获取所有联系人
-	contacts, err := db.GetContacts("", 0, 0)
-	if err != nil {
-		return nil, err
-	}
-
-	// 检查联系人列表是否为空
-	if contacts == nil || len(contacts.Items) == 0 {
-		return nil, fmt.Errorf("no contacts found")
-	}
-
 	// 获取所有聊天记录
 	var allMessages []*model.Message
-	totalContacts := len(contacts.Items)
-
-	for i, contact := range contacts.Items {
-		// 跳过没有用户名的联系人
-		if contact.UserName == "" {
-			continue
-		}
-
-		// 更新进度：获取联系人列表的进度
-		if progress != nil {
-			progress(i+1, totalContacts)
-		}
-
-		// 获取该联系人的聊天记录
-		msgs, err := db.GetMessages(startTime, endTime, contact.UserName, "", "", 0, 0)
+	if onlyChatRooms {
+		chatRooms, err := db.GetChatRooms("", 0, 0)
 		if err != nil {
-			log.Error().Err(err).Str("contact", contact.UserName).Msg("failed to get messages")
-			continue
+			return nil, err
+		}
+		if chatRooms == nil || len(chatRooms.Items) == 0 {
+			return nil, fmt.Errorf("no chat rooms found")
 		}
 
-		// 如果成功获取到消息，添加到列表中
-		if len(msgs) > 0 {
-			if onlySelf {
-				allMessages = append(allMessages, filterSelfMessages(msgs)...)
-			} else {
-				allMessages = append(allMessages, msgs...)
+		totalChatRooms := len(chatRooms.Items)
+		for i, chatRoom := range chatRooms.Items {
+			if chatRoom.Name == "" {
+				continue
 			}
-			log.Info().Str("contact", contact.UserName).Int("count", len(msgs)).Msg("successfully got messages")
+
+			if progress != nil {
+				progress(i+1, totalChatRooms)
+			}
+
+			msgs, err := db.GetMessages(startTime, endTime, chatRoom.Name, "", "", 0, 0)
+			if err != nil {
+				log.Error().Err(err).Str("chatroom", chatRoom.Name).Msg("failed to get messages")
+				continue
+			}
+
+			if len(msgs) > 0 {
+				if onlySelf {
+					allMessages = append(allMessages, filterSelfMessages(msgs)...)
+				} else {
+					allMessages = append(allMessages, msgs...)
+				}
+				log.Info().Str("chatroom", chatRoom.Name).Int("count", len(msgs)).Msg("successfully got messages")
+			}
+		}
+	} else {
+		contacts, err := db.GetContacts("", 0, 0)
+		if err != nil {
+			return nil, err
+		}
+		if contacts == nil || len(contacts.Items) == 0 {
+			return nil, fmt.Errorf("no contacts found")
+		}
+
+		totalContacts := len(contacts.Items)
+		for i, contact := range contacts.Items {
+			if contact.UserName == "" {
+				continue
+			}
+
+			if progress != nil {
+				progress(i+1, totalContacts)
+			}
+
+			msgs, err := db.GetMessages(startTime, endTime, contact.UserName, "", "", 0, 0)
+			if err != nil {
+				log.Error().Err(err).Str("contact", contact.UserName).Msg("failed to get messages")
+				continue
+			}
+
+			if len(msgs) > 0 {
+				if onlySelf {
+					allMessages = append(allMessages, filterSelfMessages(msgs)...)
+				} else {
+					allMessages = append(allMessages, msgs...)
+				}
+				log.Info().Str("contact", contact.UserName).Int("count", len(msgs)).Msg("successfully got messages")
+			}
 		}
 	}
 

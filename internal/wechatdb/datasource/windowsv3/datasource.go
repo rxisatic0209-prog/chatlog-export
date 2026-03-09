@@ -462,120 +462,67 @@ func (ds *DataSource) GetChatRooms(ctx context.Context, key string, limit, offse
 	var args []interface{}
 
 	if key != "" {
-		// 按照关键字查询
-		query = `SELECT ChatRoomName, Reserved2, RoomData FROM ChatRoom WHERE ChatRoomName = ?`
-		args = []interface{}{key}
-
-		// 执行查询
-		db, err := ds.dbm.GetDB(Contact)
-		if err != nil {
-			return nil, err
-		}
-		rows, err := db.QueryContext(ctx, query, args...)
-		if err != nil {
-			return nil, errors.QueryFailed(query, err)
-		}
-		defer rows.Close()
-
-		chatRooms := []*model.ChatRoom{}
-		for rows.Next() {
-			var chatRoomV3 model.ChatRoomV3
-			err := rows.Scan(
-				&chatRoomV3.ChatRoomName,
-				&chatRoomV3.Reserved2,
-				&chatRoomV3.RoomData,
-			)
-
-			if err != nil {
-				return nil, errors.ScanRowFailed(err)
-			}
-
-			chatRooms = append(chatRooms, chatRoomV3.Wrap())
-		}
-
-		// 如果没有找到群聊，尝试通过联系人查找
-		if len(chatRooms) == 0 {
-			contacts, err := ds.GetContacts(ctx, key, 1, 0)
-			if err == nil && len(contacts) > 0 && strings.HasSuffix(contacts[0].UserName, "@chatroom") {
-				// 再次尝试通过用户名查找群聊
-				rows, err := db.QueryContext(ctx,
-					`SELECT ChatRoomName, Reserved2, RoomData FROM ChatRoom WHERE ChatRoomName = ?`,
-					contacts[0].UserName)
-
-				if err != nil {
-					return nil, errors.QueryFailed(query, err)
-				}
-				defer rows.Close()
-
-				for rows.Next() {
-					var chatRoomV3 model.ChatRoomV3
-					err := rows.Scan(
-						&chatRoomV3.ChatRoomName,
-						&chatRoomV3.Reserved2,
-						&chatRoomV3.RoomData,
-					)
-
-					if err != nil {
-						return nil, errors.ScanRowFailed(err)
-					}
-
-					chatRooms = append(chatRooms, chatRoomV3.Wrap())
-				}
-
-				// 如果群聊记录不存在，但联系人记录存在，创建一个模拟的群聊对象
-				if len(chatRooms) == 0 {
-					chatRooms = append(chatRooms, &model.ChatRoom{
-						Name:             contacts[0].UserName,
-						Users:            make([]model.ChatRoomUser, 0),
-						User2DisplayName: make(map[string]string),
-					})
-				}
-			}
-		}
-
-		return chatRooms, nil
+		query = `
+			SELECT UserName, Alias, Remark, NickName, Reserved1
+			FROM Contact
+			WHERE UserName LIKE '%@chatroom'
+			  AND (UserName = ? OR Alias = ? OR Remark = ? OR NickName = ?)
+		`
+		args = []interface{}{key, key, key, key}
 	} else {
-		// 查询所有群聊
-		query = `SELECT ChatRoomName, Reserved2, RoomData FROM ChatRoom`
-
-		// 添加排序、分页
-		query += ` ORDER BY ChatRoomName`
-		if limit > 0 {
-			query += fmt.Sprintf(" LIMIT %d", limit)
-			if offset > 0 {
-				query += fmt.Sprintf(" OFFSET %d", offset)
-			}
-		}
-
-		// 执行查询
-		db, err := ds.dbm.GetDB(Contact)
-		if err != nil {
-			return nil, err
-		}
-		rows, err := db.QueryContext(ctx, query, args...)
-		if err != nil {
-			return nil, errors.QueryFailed(query, err)
-		}
-		defer rows.Close()
-
-		chatRooms := []*model.ChatRoom{}
-		for rows.Next() {
-			var chatRoomV3 model.ChatRoomV3
-			err := rows.Scan(
-				&chatRoomV3.ChatRoomName,
-				&chatRoomV3.Reserved2,
-				&chatRoomV3.RoomData,
-			)
-
-			if err != nil {
-				return nil, errors.ScanRowFailed(err)
-			}
-
-			chatRooms = append(chatRooms, chatRoomV3.Wrap())
-		}
-
-		return chatRooms, nil
+		query = `
+			SELECT UserName, Alias, Remark, NickName, Reserved1
+			FROM Contact
+			WHERE UserName LIKE '%@chatroom'
+		`
 	}
+
+	query += ` ORDER BY UserName`
+	if limit > 0 {
+		query += fmt.Sprintf(" LIMIT %d", limit)
+		if offset > 0 {
+			query += fmt.Sprintf(" OFFSET %d", offset)
+		}
+	}
+
+	db, err := ds.dbm.GetDB(Contact)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, errors.QueryFailed(query, err)
+	}
+	defer rows.Close()
+
+	chatRooms := []*model.ChatRoom{}
+	for rows.Next() {
+		var contactV3 model.ContactV3
+		err := rows.Scan(
+			&contactV3.UserName,
+			&contactV3.Alias,
+			&contactV3.Remark,
+			&contactV3.NickName,
+			&contactV3.Reserved1,
+		)
+		if err != nil {
+			return nil, errors.ScanRowFailed(err)
+		}
+
+		if contactV3.UserName == "" || !strings.HasSuffix(contactV3.UserName, "@chatroom") {
+			continue
+		}
+
+		chatRooms = append(chatRooms, &model.ChatRoom{
+			Name:             contactV3.UserName,
+			Remark:           contactV3.Remark,
+			NickName:         contactV3.NickName,
+			Users:            make([]model.ChatRoomUser, 0),
+			User2DisplayName: make(map[string]string),
+		})
+	}
+
+	return chatRooms, nil
 }
 
 // GetSessions 实现获取会话信息的方法
@@ -605,7 +552,7 @@ func (ds *DataSource) GetSessions(ctx context.Context, key string, limit, offset
 		}
 	}
 
-	// 执行查询
+	// Session 表在 Contact 库里
 	db, err := ds.dbm.GetDB(Contact)
 	if err != nil {
 		return nil, err
@@ -626,7 +573,6 @@ func (ds *DataSource) GetSessions(ctx context.Context, key string, limit, offset
 			&sessionV3.StrContent,
 			&sessionV3.NTime,
 		)
-
 		if err != nil {
 			return nil, errors.ScanRowFailed(err)
 		}
@@ -749,9 +695,7 @@ func (ds *DataSource) GetVoice(ctx context.Context, key string) (*model.Media, e
 
 		for rows.Next() {
 			var voiceData []byte
-			err := rows.Scan(
-				&voiceData,
-			)
+			err := rows.Scan(&voiceData)
 			if err != nil {
 				return nil, errors.ScanRowFailed(err)
 			}
@@ -768,7 +712,7 @@ func (ds *DataSource) GetVoice(ctx context.Context, key string) (*model.Media, e
 	return nil, errors.ErrMediaNotFound
 }
 
-// Close 实现 DataSource 接口的 Close 方法
+// Close 实现关闭数据库连接的方法
 func (ds *DataSource) Close() error {
 	return ds.dbm.Close()
 }

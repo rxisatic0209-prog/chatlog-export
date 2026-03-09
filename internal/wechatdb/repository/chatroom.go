@@ -25,10 +25,17 @@ func (r *Repository) initChatRoomCache(ctx context.Context) error {
 	chatRoomNickName := make([]string, 0)
 
 	for _, chatRoom := range chatRooms {
+		// 只保留真正的群聊
+		if chatRoom == nil || chatRoom.Name == "" || !strings.HasSuffix(chatRoom.Name, "@chatroom") {
+			continue
+		}
+
 		// 补充群聊信息（从联系人中获取 Remark 和 NickName）
 		r.enrichChatRoom(chatRoom)
+
 		chatRoomMap[chatRoom.Name] = chatRoom
 		chatRoomList = append(chatRoomList, chatRoom.Name)
+
 		if chatRoom.Remark != "" {
 			remark, ok := remarkToChatRoom[chatRoom.Remark]
 			if !ok {
@@ -38,6 +45,7 @@ func (r *Repository) initChatRoomCache(ctx context.Context) error {
 			remarkToChatRoom[chatRoom.Remark] = remark
 			chatRoomRemark = append(chatRoomRemark, chatRoom.Remark)
 		}
+
 		if chatRoom.NickName != "" {
 			nickName, ok := nickNameToChatRoom[chatRoom.NickName]
 			if !ok {
@@ -49,7 +57,12 @@ func (r *Repository) initChatRoomCache(ctx context.Context) error {
 		}
 	}
 
+	// 从联系人缓存中补充缺失的群聊
 	for _, contact := range r.chatRoomInContact {
+		if contact == nil || contact.UserName == "" || !strings.HasSuffix(contact.UserName, "@chatroom") {
+			continue
+		}
+
 		if _, ok := chatRoomMap[contact.UserName]; !ok {
 			chatRoom := &model.ChatRoom{
 				Name:     contact.UserName,
@@ -58,6 +71,7 @@ func (r *Repository) initChatRoomCache(ctx context.Context) error {
 			}
 			chatRoomMap[contact.UserName] = chatRoom
 			chatRoomList = append(chatRoomList, contact.UserName)
+
 			if contact.Remark != "" {
 				remark, ok := remarkToChatRoom[chatRoom.Remark]
 				if !ok {
@@ -67,6 +81,7 @@ func (r *Repository) initChatRoomCache(ctx context.Context) error {
 				remarkToChatRoom[chatRoom.Remark] = remark
 				chatRoomRemark = append(chatRoomRemark, contact.Remark)
 			}
+
 			if contact.NickName != "" {
 				nickName, ok := nickNameToChatRoom[chatRoom.NickName]
 				if !ok {
@@ -78,6 +93,7 @@ func (r *Repository) initChatRoomCache(ctx context.Context) error {
 			}
 		}
 	}
+
 	sort.Strings(chatRoomList)
 	sort.Strings(chatRoomRemark)
 	sort.Strings(chatRoomNickName)

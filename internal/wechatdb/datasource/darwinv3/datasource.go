@@ -427,15 +427,31 @@ func (ds *DataSource) GetChatRooms(ctx context.Context, key string, limit, offse
 	var args []interface{}
 
 	if key != "" {
-		// 按照关键字查询
-		query = `SELECT IFNULL(m_nsUsrName,""), IFNULL(nickname,""), IFNULL(m_nsRemark,""), IFNULL(m_nsChatRoomMemList,""), IFNULL(m_nsChatRoomAdminList,"") 
-				FROM GroupContact 
-				WHERE m_nsUsrName = ? OR nickname = ? OR m_nsRemark = ?`
+		// 按关键字查询，但只返回真正的群聊
+		query = `
+			SELECT 
+				IFNULL(m_nsUsrName, ""),
+				IFNULL(nickname, ""),
+				IFNULL(m_nsRemark, ""),
+				IFNULL(m_nsChatRoomMemList, ""),
+				IFNULL(m_nsChatRoomAdminList, "")
+			FROM GroupContact
+			WHERE m_nsUsrName LIKE '%@chatroom'
+			  AND (m_nsUsrName = ? OR nickname = ? OR m_nsRemark = ?)
+		`
 		args = []interface{}{key, key, key}
 	} else {
-		// 查询所有群聊
-		query = `SELECT IFNULL(m_nsUsrName,""), IFNULL(nickname,""), IFNULL(m_nsRemark,""), IFNULL(m_nsChatRoomMemList,""), IFNULL(m_nsChatRoomAdminList,"") 
-				FROM GroupContact`
+		// 查询所有群聊，但只返回真正的群聊
+		query = `
+			SELECT 
+				IFNULL(m_nsUsrName, ""),
+				IFNULL(nickname, ""),
+				IFNULL(m_nsRemark, ""),
+				IFNULL(m_nsChatRoomMemList, ""),
+				IFNULL(m_nsChatRoomAdminList, "")
+			FROM GroupContact
+			WHERE m_nsUsrName LIKE '%@chatroom'
+		`
 	}
 
 	// 添加排序、分页
@@ -468,48 +484,62 @@ func (ds *DataSource) GetChatRooms(ctx context.Context, key string, limit, offse
 			&chatRoomDarwinV3.M_nsChatRoomMemList,
 			&chatRoomDarwinV3.M_nsChatRoomAdminList,
 		)
-
 		if err != nil {
 			return nil, errors.ScanRowFailed(err)
 		}
 
-		chatRooms = append(chatRooms, chatRoomDarwinV3.Wrap(ds.user2DisplayName))
+		chatRoom := chatRoomDarwinV3.Wrap(ds.user2DisplayName)
+
+		// Go 层再兜底过滤一次，确保一定是群聊
+		if chatRoom == nil || chatRoom.Name == "" || !strings.HasSuffix(chatRoom.Name, "@chatroom") {
+			continue
+		}
+
+		chatRooms = append(chatRooms, chatRoom)
 	}
 
-	// 如果没有找到群聊，尝试通过联系人查找
+	// 如果按 key 没找到，再尝试通过联系人反查，但也只接受群聊
 	if len(chatRooms) == 0 && key != "" {
 		contacts, err := ds.GetContacts(ctx, key, 1, 0)
 		if err == nil && len(contacts) > 0 && strings.HasSuffix(contacts[0].UserName, "@chatroom") {
-			// 再次尝试通过用户名查找群聊
-			rows, err := db.QueryContext(ctx,
-				`SELECT IFNULL(m_nsUsrName,""), IFNULL(nickname,""), IFNULL(m_nsRemark,""), IFNULL(m_nsChatRoomMemList,""), IFNULL(m_nsChatRoomAdminList,"") 
-				FROM GroupContact 
-				WHERE m_nsUsrName = ?`,
-				contacts[0].UserName)
-
+			rows2, err := db.QueryContext(ctx, `
+				SELECT 
+					IFNULL(m_nsUsrName, ""),
+					IFNULL(nickname, ""),
+					IFNULL(m_nsRemark, ""),
+					IFNULL(m_nsChatRoomMemList, ""),
+					IFNULL(m_nsChatRoomAdminList, "")
+				FROM GroupContact
+				WHERE m_nsUsrName = ?
+				  AND m_nsUsrName LIKE '%@chatroom'
+			`, contacts[0].UserName)
 			if err != nil {
 				return nil, errors.QueryFailed(query, err)
 			}
-			defer rows.Close()
+			defer rows2.Close()
 
-			for rows.Next() {
+			for rows2.Next() {
 				var chatRoomDarwinV3 model.ChatRoomDarwinV3
-				err := rows.Scan(
+				err := rows2.Scan(
 					&chatRoomDarwinV3.M_nsUsrName,
 					&chatRoomDarwinV3.Nickname,
 					&chatRoomDarwinV3.M_nsRemark,
 					&chatRoomDarwinV3.M_nsChatRoomMemList,
 					&chatRoomDarwinV3.M_nsChatRoomAdminList,
 				)
-
 				if err != nil {
 					return nil, errors.ScanRowFailed(err)
 				}
 
-				chatRooms = append(chatRooms, chatRoomDarwinV3.Wrap(ds.user2DisplayName))
+				chatRoom := chatRoomDarwinV3.Wrap(ds.user2DisplayName)
+				if chatRoom == nil || chatRoom.Name == "" || !strings.HasSuffix(chatRoom.Name, "@chatroom") {
+					continue
+				}
+
+				chatRooms = append(chatRooms, chatRoom)
 			}
 
-			// 如果群聊记录不存在，但联系人记录存在，创建一个模拟的群聊对象
+			// 如果群聊记录不存在，但联系人记录存在，则创建一个最小群聊对象
 			if len(chatRooms) == 0 {
 				chatRooms = append(chatRooms, &model.ChatRoom{
 					Name:  contacts[0].UserName,
